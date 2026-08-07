@@ -193,8 +193,23 @@ export function diffSoloEcho(
     const a = sent[key];
     const b = received[key];
     if (key === "infusion") {
-      if (JSON.stringify(a) !== JSON.stringify(b)) {
-        issues.push(`infusion: sent ${JSON.stringify(a)}, Fellow saved ${JSON.stringify(b)}`);
+      // Compare stage by stage, not with JSON.stringify — Fellow echoes the
+      // same stages with `pressure` before `duration`, so a stringify compare
+      // reports drift on every single write. A warning that always fires is
+      // one the user learns to ignore.
+      const as = Array.isArray(a) ? (a as Array<Record<string, unknown>>) : [];
+      const bs = Array.isArray(b) ? (b as Array<Record<string, unknown>>) : [];
+      if (as.length !== bs.length) {
+        issues.push(`infusion: sent ${as.length} stages, Fellow saved ${bs.length}`);
+      } else {
+        for (let i = 0; i < as.length; i++) {
+          if (as[i]?.duration !== bs[i]?.duration || as[i]?.pressure !== bs[i]?.pressure) {
+            issues.push(
+              `infusion stage ${i + 1}: sent ${as[i]?.pressure}bar×${as[i]?.duration}s, ` +
+                `Fellow saved ${bs[i]?.pressure}bar×${bs[i]?.duration}s`,
+            );
+          }
+        }
       }
       continue;
     }

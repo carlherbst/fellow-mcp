@@ -123,12 +123,19 @@ export const soloCreateSchema = z.object({
   grindSize: soloProfileFields.grindSize.default(0),
 });
 
-/** Update: every field optional, merged onto the existing profile. */
+/**
+ * Update: every field optional, merged onto the existing profile.
+ *
+ * Every field is wrapped unconditionally. An earlier version wrapped only when
+ * `!v.isOptional()`, which is wrong for `z.coerce.boolean()`: coercion means
+ * `Boolean(undefined) === false`, so the schema never rejects, `isOptional()`
+ * reports true, and the field is left unwrapped. An omitted boolean then parses
+ * to `false` instead of `undefined` — so updating one field silently set
+ * `adaptive`, `preInfusionEnabled` and `rampDownEnabled` to false and the server
+ * nulled every dependent pre-infusion and ramp-down value. Observed live.
+ */
 export const soloUpdateFields = Object.fromEntries(
-  Object.entries(soloProfileFields).map(([k, v]) => [
-    k,
-    (v as z.ZodTypeAny).isOptional() ? v : (v as z.ZodTypeAny).optional(),
-  ]),
+  Object.entries(soloProfileFields).map(([k, v]) => [k, (v as z.ZodTypeAny).optional()]),
 ) as { [K in keyof typeof soloProfileFields]: z.ZodOptional<z.ZodTypeAny> };
 
 /**

@@ -792,7 +792,15 @@ function makeServer(headers: Headers, env: Env): McpServer {
       ...soloUpdateFields,
     },
     async (input) => {
-      const { idOrTitle, ...changes } = input as { idOrTitle: string } & Record<string, unknown>;
+      const { idOrTitle, ...rest } = input as { idOrTitle: string } & Record<string, unknown>;
+      // Drop keys the caller did not supply. Belt-and-braces against a schema
+      // that lets an absent field through as a concrete value: merging
+      // `{...existing, someField: undefined}` would blank a field nobody asked
+      // to change, and the server nulls its dependents in turn.
+      const changes: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(rest)) {
+        if (v !== undefined) changes[k] = v;
+      }
       const client = await soloFromHeaders(headers, env);
       const existing = await client.findProfile(idOrTitle);
       if (!existing) {
