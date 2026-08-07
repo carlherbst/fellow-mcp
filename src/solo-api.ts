@@ -141,6 +141,13 @@ function writeBody(profile: SoloProfile): Record<string, unknown> {
   for (const f of SOLO_EDITABLE_FIELDS) {
     if (profile[f] !== undefined) body[f] = profile[f];
   }
+  // `folder` is read-only in practice — a client has no business moving a
+  // profile into Fellow's built-in or Drops namespace — but the write DTO
+  // requires it present and a string ("folder must be a string" on a create
+  // that omits it, observed live). So it is set here rather than exposed as a
+  // tool parameter. Anything a user creates is "custom"; an update preserves
+  // whatever the profile already had.
+  body.folder = typeof profile.folder === "string" ? profile.folder : "custom";
   body.settingsVersion = stamp();
   return body;
 }
