@@ -1,8 +1,13 @@
 /**
- * aiden-mcp — Cloudflare Worker hosting an MCP server for the Fellow Aiden coffee brewer.
+ * fellow-mcp — Cloudflare Worker hosting an MCP server for Fellow coffee machines.
+ *
+ * Covers two products, which share a host and an auth token but not a route
+ * shape or a profile schema:
+ *   - Fellow Aiden (drip)        /v1/devices/{id}/…        brew profiles
+ *   - Fellow Espresso Series 1   /v2/solo/devices/{id}/…   pressure profiles
  *
  * Unofficial — not affiliated with or endorsed by Fellow Industries.
- * Uses the same private API the Fellow iOS app uses; could break without notice.
+ * Uses the same private API the Fellow app uses; could break without notice.
  *
  * Architecture:
  *   - Streamable HTTP MCP transport at /mcp
@@ -71,7 +76,7 @@ function fmtSolo(p: SoloProfile): string {
 
 function makeServer(headers: Headers, env: Env): McpServer {
   const server = new McpServer({
-    name: "aiden-mcp",
+    name: "fellow-mcp",
     version: VERSION,
   });
 
@@ -1002,10 +1007,10 @@ export default {
       // ---- Health / root ----
       if (request.method === "GET" && (pathname === "/" || pathname === "/health")) {
         return Response.json({
-          name: "aiden-mcp",
+          name: "fellow-mcp",
           version: VERSION,
           description:
-            "MCP server for Fellow Aiden brewer. Unofficial — not affiliated with Fellow Industries.",
+            "MCP server for Fellow coffee machines — Aiden (drip) and Espresso Series 1. Unofficial — not affiliated with Fellow Industries.",
           transport: "streamable-http",
           mcp_endpoint: "/mcp",
           oauth: {
@@ -1014,7 +1019,7 @@ export default {
             token: `${origin}/oauth/token`,
             register: `${origin}/oauth/register`,
           },
-          docs: "https://github.com/ravenintheforrest/aiden-mcp",
+          docs: "https://github.com/carlherbst/fellow-mcp",
         });
       }
 
