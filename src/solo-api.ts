@@ -26,39 +26,87 @@ const SOLO_BASE = `${API_HOST}/v2/solo`;
 /**
  * An espresso profile.
  *
- * Field names and ranges below come from `ehthayer/curvia`'s FELLOW_API.md,
- * derived from the Fellow Android app's Hermes bundle and verified end-to-end
- * against a real machine by its author — but not yet against ours. Unknown
- * fields are preserved on read so a round-trip never drops data we didn't
- * model.
+ * Field names, types and observed ranges below were read off a live Espresso
+ * Series 1 (firmware 2.3.20) via GET /v2/solo/devices/{id}/profiles.
+ * Documented limits that are wider than what Fellow's own profiles use are
+ * attributed to `ehthayer/curvia`'s FELLOW_API.md.
+ *
+ * Unknown fields are preserved on read so a round-trip never drops data we
+ * did not model.
  */
 export interface SoloProfile extends Record<string, unknown> {
   id?: string;
   title?: string;
-  /** grams of dry coffee, 6–30 */
+  /** grams of dry coffee. Observed 18–19; documented limit 6–30. */
   dose?: number;
-  /** yield ratio, <= 5 */
+  /** yield ratio, i.e. 2 means 1:2. Observed 1.5–3; documented limit <= 5. */
   ratio?: number;
-  /** brew temperature °C, 50–94 */
+  /** brew temperature °C. Observed 90–94; documented limit 50–94. */
   temperature?: number;
-  /** grind setting, <= 10 */
+  /** grind setting, fractional. Observed 0–2; documented limit <= 10. */
   grindSize?: number;
   adaptive?: boolean;
-  /** "on" | "off" — declining temperature across the shot */
+  /** "off" observed; curvia documents "on"/"off". NOT a boolean. */
   decliningTemp?: string;
-  transition?: number;
+  /** A string enum, NOT a number. Only "smooth" observed across 17 profiles. */
+  transition?: string;
   preInfusionEnabled?: boolean;
+  /** seconds. Observed 1–14. */
   preInfusionDuration?: number;
+  /** Observed 3–6.5. */
   preInfusionFillFlowRate?: number;
+  /** bar. Observed 3–9. */
   preInfusionHoldPressure?: number;
-  /** ordered pressure stages, up to 10; pressure <= 9 bar, duration <= 120 s */
+  /**
+   * Ordered pressure stages. Observed 1–6 stages, pressure 3–9 bar,
+   * duration 5–30 s; documented limits 10 stages / 9 bar / 120 s.
+   */
   infusion?: Array<{ duration: number; pressure: number }>;
   rampDownEnabled?: boolean;
+  /** seconds. Observed 1–10. */
   rampDownDuration?: number;
+  /** bar. Observed 3–9. */
   rampDownEndPressure?: number;
+  /** Free text shown in the app. Fellow uses it for tasting notes. */
+  notes?: string;
+
+  // ---- server-side, read-only ----
   /** "fellow" (built-in) | "drops" (Fellow Drops) | "custom" (user-created) */
   folder?: string;
+  /** Drops catalog metadata — present only on folder="drops". */
+  roasterName?: string;
+  imageUrl?: string;
+  blurHash?: string;
+  status?: string;
+  scheduledAt?: string;
+  updatedAt?: string;
+  deletedAt?: string | null;
 }
+
+/**
+ * The fields a client may actually set. Anything outside this list is either
+ * server-managed or Drops catalog metadata, and Fellow's DTO validation runs
+ * `forbidNonWhitelisted` — an unexpected property is a 400 naming it.
+ */
+export const SOLO_EDITABLE_FIELDS = [
+  "title",
+  "dose",
+  "ratio",
+  "temperature",
+  "grindSize",
+  "adaptive",
+  "decliningTemp",
+  "transition",
+  "preInfusionEnabled",
+  "preInfusionDuration",
+  "preInfusionFillFlowRate",
+  "preInfusionHoldPressure",
+  "infusion",
+  "rampDownEnabled",
+  "rampDownDuration",
+  "rampDownEndPressure",
+  "notes",
+] as const;
 
 export type SoloProfileCategory = "custom" | "fellow" | "drops" | "unknown";
 
@@ -69,40 +117,90 @@ export function categorizeSolo(p: SoloProfile): SoloProfileCategory {
 }
 
 /**
- * Server-managed fields that come back on reads and must not be echoed into
- * writes. Fellow's DTO validation runs `forbidNonWhitelisted`, so an
- * unexpected property is a 400 naming the property.
- *
- * `settingsVersion` is deliberately NOT in this list — writes must carry a
- * fresh one (see `stamp()`).
- */
-export const SOLO_SERVER_SIDE_FIELDS = [
-  "id",
-  "createdAt",
-  "updatedAt",
-  "deletedAt",
-  "deviceId",
-  "sharedFrom",
-  "synced",
-  "lastUsedTime",
-  "isDefaultProfile",
-  "folder",
-];
-
-/**
  * Every write carries a client-generated `settingsVersion` in whole seconds.
  * The server resolves conflicts last-write-wins on this value, so a client
  * with a slow clock silently loses to one with a fast clock.
+ *
+ * Caveat: profile objects come back from GET *without* a settingsVersion —
+ * only the device object carries one. That it belongs on a profile write is
+ * curvia's claim, not something we have observed. `call()` recovers if it is
+ * wrong (see the forbidden-property retry).
  */
 function stamp(): number {
   return Math.floor(Date.now() / 1000);
 }
 
+/**
+ * Build a write body by allowlist. A denylist would be wrong here: Fellow
+ * validates with `forbidNonWhitelisted`, so any field we failed to anticipate
+ * — including the Drops catalog metadata that rides along on read — becomes a
+ * 400 rather than being ignored.
+ */
 function writeBody(profile: SoloProfile): Record<string, unknown> {
-  const body: Record<string, unknown> = { ...profile };
-  for (const f of SOLO_SERVER_SIDE_FIELDS) delete body[f];
+  const body: Record<string, unknown> = {};
+  for (const f of SOLO_EDITABLE_FIELDS) {
+    if (profile[f] !== undefined) body[f] = profile[f];
+  }
   body.settingsVersion = stamp();
   return body;
+}
+
+/**
+ * Pull property names out of a class-validator rejection.
+ * Fellow returns e.g. { message: ["property foo should not exist"] }.
+ */
+function forbiddenProperties(body: unknown): string[] {
+  const raw = (body as { message?: unknown })?.message;
+  const msgs = Array.isArray(raw) ? raw : typeof raw === "string" ? [raw] : [];
+  const names: string[] = [];
+  for (const m of msgs) {
+    const hit = /property (\w+) should not exist/i.exec(String(m));
+    if (hit) names.push(hit[1]);
+  }
+  return names;
+}
+
+/**
+ * Compare what we sent against what Fellow echoed back.
+ *
+ * The API is undocumented, so a renamed or silently-ignored field would still
+ * return 200 with an id and look like success — while the machine brews
+ * something other than what was asked for. Surface any mismatch loudly rather
+ * than reporting a clean write.
+ */
+export function diffSoloEcho(
+  sent: Record<string, unknown>,
+  received: Record<string, unknown>,
+): string[] {
+  const keys = SOLO_EDITABLE_FIELDS.filter((k) => sent[k] !== undefined);
+
+  const echoed = keys.filter((k) => received[k] !== undefined).length;
+  if (keys.length && echoed < Math.min(3, keys.length)) {
+    return [
+      "Fellow's response no longer echoes the saved profile fields (possible API change) — can't verify the write landed with the right values. Check the profile in the Fellow app before brewing.",
+    ];
+  }
+
+  const issues: string[] = [];
+  for (const key of keys) {
+    const a = sent[key];
+    const b = received[key];
+    if (key === "infusion") {
+      if (JSON.stringify(a) !== JSON.stringify(b)) {
+        issues.push(`infusion: sent ${JSON.stringify(a)}, Fellow saved ${JSON.stringify(b)}`);
+      }
+      continue;
+    }
+    if (typeof a === "number") {
+      // Fellow rounds some fields server-side; tolerate float noise only.
+      if (typeof b !== "number" || Math.abs(a - b) > 1e-6) {
+        issues.push(`${key}: sent ${a}, Fellow saved ${JSON.stringify(b)}`);
+      }
+    } else if (a !== b) {
+      issues.push(`${key}: sent ${JSON.stringify(a)}, Fellow saved ${JSON.stringify(b)}`);
+    }
+  }
+  return issues;
 }
 
 export class SoloClient {
@@ -135,6 +233,8 @@ export class SoloClient {
     method: string,
     path: string,
     body?: unknown,
+    /** internal: guards the forbidden-property retry against looping */
+    retriesLeft = 3,
   ): Promise<unknown> {
     const { id } = await this.getDevice();
     const r = await fetch(`${SOLO_BASE}/devices/${id}${path}`, {
@@ -149,7 +249,30 @@ export class SoloClient {
     } catch {
       // non-JSON body — keep the raw text for the error message
     }
+
     if (!r.ok) {
+      // Fellow's schema is undocumented and we have not observed a write.
+      // When it rejects a property by name, drop that property and retry
+      // rather than failing the user's request on our own bad guess.
+      const forbidden = forbiddenProperties(parsed);
+      if (
+        r.status === 400 &&
+        forbidden.length &&
+        retriesLeft > 0 &&
+        body &&
+        typeof body === "object"
+      ) {
+        const trimmed = { ...(body as Record<string, unknown>) };
+        let dropped = false;
+        for (const f of forbidden) {
+          if (f in trimmed) {
+            delete trimmed[f];
+            dropped = true;
+          }
+        }
+        if (dropped) return this.call(method, path, trimmed, retriesLeft - 1);
+      }
+
       const msg =
         (parsed as { message?: string | string[] })?.message ??
         `${method} ${path} failed`;

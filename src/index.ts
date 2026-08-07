@@ -19,7 +19,12 @@ import { z } from "zod";
 import { clientFromHeaders, NoCredentialsError, ExpiredTokenError } from "./auth.js";
 import { profileInputSchema, checkPulseConsistency } from "./validation.js";
 import { FellowApiError, categorize, CUSTOM_PROFILE_CAP } from "./fellow-api.js";
-import { SoloClient, categorizeSolo, SoloProfile } from "./solo-api.js";
+import { SoloClient, categorizeSolo, SoloProfile, diffSoloEcho } from "./solo-api.js";
+import {
+  soloCreateSchema,
+  soloUpdateFields,
+  checkSoloConsistency,
+} from "./solo-validation.js";
 import { diffProfileEcho } from "./fellow-schemas.js";
 import { fetchCoffeeDetails } from "./coffee-fetcher.js";
 import { brewingGuidelines } from "./brewing-guidelines.js";
@@ -732,6 +737,182 @@ function makeServer(headers: Headers, env: Env): McpServer {
     },
   );
 
+  // ---- create_espresso_profile ----
+  server.tool(
+    "create_espresso_profile",
+    "Create a new espresso profile on the Fellow Espresso Series 1. This is a PRESSURE profile — the shape of the shot is the `infusion` array of {duration, pressure} stages, optionally preceded by pre-infusion and followed by a ramp-down. Nothing like an Aiden brew profile; use create_profile for the Aiden. Unspecified fields default to Fellow's 'Classic 9 bar' built-in.",
+    soloCreateSchema.shape,
+    async (input) => {
+      const parsed = soloCreateSchema.parse(input);
+      const problems = checkSoloConsistency(parsed);
+      if (problems.length) {
+        return {
+          isError: true,
+          content: [
+            { type: "text", text: `Profile validation failed:\n  ${problems.join("\n  ")}` },
+          ],
+        };
+      }
+
+      const client = await soloFromHeaders(headers, env);
+      const created = await client.createProfile(parsed as SoloProfile);
+
+      const drift = diffSoloEcho(
+        parsed as Record<string, unknown>,
+        created as unknown as Record<string, unknown>,
+      );
+      const stages = parsed.infusion
+        .map((s) => `${s.pressure}bar×${s.duration}s`)
+        .join(" → ");
+
+      let text =
+        `Created espresso profile "${created.title ?? parsed.title}" (id: ${created.id}).\n` +
+        `${parsed.dose}g in, 1:${parsed.ratio} (${(parsed.dose * parsed.ratio).toFixed(1)}g out), ${parsed.temperature}°C, grind ${parsed.grindSize}\n` +
+        `Shot: ${parsed.preInfusionEnabled ? `pre-infuse ${parsed.preInfusionDuration}s @ ${parsed.preInfusionHoldPressure}bar → ` : ""}${stages}${parsed.rampDownEnabled ? ` → ramp down to ${parsed.rampDownEndPressure}bar over ${parsed.rampDownDuration}s` : ""}\n\n` +
+        `It's on the machine now. Use set_active_espresso_profile to select it on the front panel.`;
+      if (drift.length) {
+        text +=
+          `\n\n⚠ IMPORTANT — Fellow saved different values than were sent (possible API change). ` +
+          `Tell the user to verify the profile in the Fellow app before pulling a shot:\n` +
+          drift.map((d) => `  - ${d}`).join("\n");
+      }
+      return { content: [{ type: "text", text }] };
+    },
+  );
+
+  // ---- update_espresso_profile ----
+  server.tool(
+    "update_espresso_profile",
+    "Update an espresso profile on the Series 1 in place — the normal way to dial a shot in. Pass the profile id or exact title plus ANY subset of fields; unspecified fields keep their current values. Only user-created profiles can be edited; Fellow built-ins and Drops profiles are read-only.",
+    {
+      idOrTitle: z
+        .string()
+        .min(1)
+        .describe("Espresso profile id, or exact case-sensitive title"),
+      ...soloUpdateFields,
+    },
+    async (input) => {
+      const { idOrTitle, ...changes } = input as { idOrTitle: string } & Record<string, unknown>;
+      const client = await soloFromHeaders(headers, env);
+      const existing = await client.findProfile(idOrTitle);
+      if (!existing) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: `No espresso profile matched "${idOrTitle}". Run list_espresso_profiles — titles are case-sensitive.`,
+            },
+          ],
+        };
+      }
+      const folder = (existing.folder ?? "").toLowerCase();
+      if (folder && folder !== "custom") {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text:
+                `"${existing.title}" is a ${folder === "drops" ? "Fellow Drops" : "Fellow built-in"} profile and cannot be edited.\n` +
+                `Create a copy with create_espresso_profile and change that instead.`,
+            },
+          ],
+        };
+      }
+
+      // PATCH validates the whole DTO, so merge onto the existing profile
+      // rather than sending only the changed fields.
+      const merged = { ...existing, ...changes } as SoloProfile;
+      const problems = checkSoloConsistency(merged as never);
+      if (problems.length) {
+        return {
+          isError: true,
+          content: [
+            { type: "text", text: `Update would create an inconsistent profile:\n  ${problems.join("\n  ")}` },
+          ],
+        };
+      }
+
+      const updated = await client.updateProfile(existing.id!, merged);
+      const drift = diffSoloEcho(
+        changes as Record<string, unknown>,
+        updated as unknown as Record<string, unknown>,
+      );
+      const changed = Object.keys(changes);
+      let text =
+        `Updated "${updated.title ?? existing.title}" (id: ${existing.id}).\n` +
+        `Changed: ${changed.length ? changed.join(", ") : "(nothing)"}`;
+      if (drift.length) {
+        text +=
+          `\n\n⚠ IMPORTANT — Fellow saved different values than were sent (possible API change). ` +
+          `Tell the user to verify the profile in the Fellow app before pulling a shot:\n` +
+          drift.map((d) => `  - ${d}`).join("\n");
+      }
+      return { content: [{ type: "text", text }] };
+    },
+  );
+
+  // ---- delete_espresso_profile ----
+  server.tool(
+    "delete_espresso_profile",
+    "Delete a user-created espresso profile from the Series 1. IRREVERSIBLE — Fellow has no recycle bin and no undo. Confirm with the user before calling, and consider list_espresso_profiles first so the profile's values can be recorded and recreated if this turns out to be a mistake. Fellow built-ins and Drops profiles cannot be deleted.",
+    {
+      idOrTitle: z
+        .string()
+        .min(1)
+        .describe("Espresso profile id, or exact case-sensitive title"),
+    },
+    async ({ idOrTitle }) => {
+      const client = await soloFromHeaders(headers, env);
+      const profile = await client.findProfile(idOrTitle);
+      if (!profile) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: `No espresso profile matched "${idOrTitle}". Run list_espresso_profiles — titles are case-sensitive.`,
+            },
+          ],
+        };
+      }
+      const folder = (profile.folder ?? "").toLowerCase();
+      if (folder && folder !== "custom") {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: `"${profile.title}" is a ${folder === "drops" ? "Fellow Drops" : "Fellow built-in"} profile and cannot be deleted.`,
+            },
+          ],
+        };
+      }
+      await client.deleteProfile(profile.id!);
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              `Deleted espresso profile "${profile.title}" (id: ${profile.id}).\n\n` +
+              `Its settings were: ${JSON.stringify(
+                {
+                  dose: profile.dose,
+                  ratio: profile.ratio,
+                  temperature: profile.temperature,
+                  grindSize: profile.grindSize,
+                  infusion: profile.infusion,
+                },
+                null,
+                2,
+              )}\n(Recorded here because Fellow has no undo.)`,
+          },
+        ],
+      };
+    },
+  );
+
   // ---- share_espresso_profile ----
   server.tool(
     "share_espresso_profile",
@@ -846,6 +1027,9 @@ export default {
           "toggle_schedule",
           "get_espresso_device_info",
           "list_espresso_profiles",
+          "create_espresso_profile",
+          "update_espresso_profile",
+          "delete_espresso_profile",
           "set_active_espresso_profile",
           "share_espresso_profile",
         ]);
