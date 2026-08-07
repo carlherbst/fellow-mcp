@@ -179,7 +179,17 @@ export function diffSoloEcho(
   sent: Record<string, unknown>,
   received: Record<string, unknown>,
 ): string[] {
-  const keys = SOLO_EDITABLE_FIELDS.filter((k) => sent[k] !== undefined);
+  // When a stage is disabled the server nulls its dependent fields, so sending
+  // them and getting null back is correct behaviour, not drift. Reporting it
+  // would fire a warning on most writes.
+  const piOff = sent.preInfusionEnabled === false;
+  const rdOff = sent.rampDownEnabled === false;
+  const keys = SOLO_EDITABLE_FIELDS.filter((k) => {
+    if (sent[k] === undefined) return false;
+    if (piOff && k.startsWith("preInfusion") && k !== "preInfusionEnabled") return false;
+    if (rdOff && k.startsWith("rampDown") && k !== "rampDownEnabled") return false;
+    return true;
+  });
 
   const echoed = keys.filter((k) => received[k] !== undefined).length;
   if (keys.length && echoed < Math.min(3, keys.length)) {
