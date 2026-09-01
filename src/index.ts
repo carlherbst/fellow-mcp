@@ -978,7 +978,22 @@ export default {
 
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
-    const origin = `${url.protocol}//${url.host}`;
+    // Behind a TLS-terminating reverse proxy (caddy), the request reaches this
+    // worker as plain http, so url.protocol would advertise http:// OAuth
+    // endpoints — and OAuth clients (Claude Code among them) refuse to send
+    // credentials to a non-https token endpoint, which makes the server
+    // unauthenticatable. Trust the proxy for the SCHEME ONLY. The host still
+    // comes from the Host header, so a spoofed X-Forwarded-* cannot point the
+    // authorize/token URLs at somebody else's server.
+    const forwardedProto = (request.headers.get("x-forwarded-proto") ?? "")
+      .split(",")[0]
+      ?.trim()
+      .toLowerCase();
+    const scheme =
+      forwardedProto === "https" || forwardedProto === "http"
+        ? `${forwardedProto}:`
+        : url.protocol;
+    const origin = `${scheme}//${url.host}`;
     const pathname = url.pathname;
 
     try {
