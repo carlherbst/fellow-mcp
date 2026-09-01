@@ -176,7 +176,7 @@ function renderSignInHtml(q: AuthorizeQuery, errorMessage?: string): string {
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Sign in — aiden-mcp</title>
+  <title>Sign in — fellow-mcp</title>
   <style>
     /* Single explicit color scheme that's readable in any host context.
        The OAuth flow opens in a new tab so we control the rendering, but
@@ -296,9 +296,9 @@ function renderSignInHtml(q: AuthorizeQuery, errorMessage?: string): string {
 <body>
   <div class="wrap">
     <div class="card">
-      <div class="badge">aiden-mcp</div>
+      <div class="badge">fellow-mcp</div>
       <h1>Sign in to Fellow</h1>
-      <p class="sub">An MCP client is requesting access to your Aiden brewer. Sign in with your Fellow account to authorize.</p>
+      <p class="sub">An MCP client is requesting access to your Fellow machines — the Aiden brewer and the Espresso Series 1. Sign in with your Fellow account to authorize.</p>
       ${error}
       <form method="post" action="/oauth/authorize" autocomplete="on">
         ${fields}
@@ -313,7 +313,7 @@ function renderSignInHtml(q: AuthorizeQuery, errorMessage?: string): string {
         Only the resulting Fellow JWT (which Fellow itself issues) is briefly cached so this server can call Fellow on your behalf.
         <br /><br />
         Unofficial — not affiliated with Fellow Industries.
-        <a href="https://github.com/ravenintheforrest/aiden-mcp">View source</a>.
+        <a href="https://github.com/carlherbst/fellow-mcp">View source</a>.
       </div>
     </div>
   </div>
