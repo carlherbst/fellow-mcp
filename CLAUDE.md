@@ -2,7 +2,7 @@
 
 Unofficial **MCP server for Fellow's connected coffee machines** — the **Aiden** (drip) and the **Espresso Series 1**. Push/list/update/delete/share profiles over Fellow's private API, scrape coffee details from roaster product pages, and apply brewing heuristics to design a recipe. TypeScript, runs as a **Cloudflare Worker** (Streamable-HTTP MCP transport + OAuth 2.0).
 
-> **This is `carlherbst/fellow-mcp`, a fork of `ravenintheforrest/aiden-mcp`** (still `upstream`). Upstream is Aiden-only; the fork adds Series 1 support on branch `feat/series-1-espresso`. Renamed from `aiden-mcp` 2026-08-07.
+> **This is `carlherbst/fellow-mcp`, a fork of `ravenintheforrest/aiden-mcp`** (still `upstream`). Upstream is Aiden-only; the fork adds Series 1 support, merged to **`main`** (the deployed branch since 2026-09-01). Repo renamed from `aiden-mcp` 2026-08-07; the deployment followed on 2026-09-01.
 >
 > `TASKS.md` and `SESSIONS.md` are **upstream's working notes** — another developer's machine, vault paths, and history. They are deliberately left unedited; don't treat them as describing this deployment.
 
@@ -23,7 +23,7 @@ Espresso write rules that are easy to get wrong (all learned from live 400s — 
 - Every write is echo-checked (`diffSoloEcho`) — a 200 that saved different values is reported, not treated as success.
 
 ## Where things live
-- **This fork is not deployed to Cloudflare.** It runs `wrangler dev` in **local mode (workerd)** as a LAN-only container: Komodo stack `aiden-mcp` on server `infra-lxc` (10.0.1.149), port 8787. The upstream Cloudflare deploy path still works but is unused here.
+- **This fork is not deployed to Cloudflare.** It runs `wrangler dev` in **local mode (workerd)** as a LAN-only container: Komodo stack `fellow-mcp` on server `infra-lxc` (10.0.1.149), port 8787. The upstream Cloudflare deploy path still works but is unused here.
 - **Deploying a change:** push to the branch, then Komodo **deploy** (recreates on a compose change) or **restart** (re-fetches the branch). The start command hard-resets to `origin/$REPO_REF`, so local edits in the `app` volume are discarded.
 - **State:** none persistent. KV (`AIDEN_OAUTH`) holds only short-lived records — auth codes ≤10min, access tokens ≤1hr, client regs ≤90d. **Only Fellow-issued JWTs are stored, never the Fellow password.**
 - **Secrets:** canary account creds + webhook. Local dev vars in `.dev.vars` (untracked). Never in-repo.

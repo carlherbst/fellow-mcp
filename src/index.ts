@@ -1082,7 +1082,7 @@ export default {
                   status: 401,
                   headers: {
                     "Content-Type": "application/json",
-                    "WWW-Authenticate": `Bearer realm="aiden-mcp", error="invalid_token", resource_metadata="${origin}/.well-known/oauth-protected-resource"`,
+                    "WWW-Authenticate": `Bearer realm="fellow-mcp", error="invalid_token", resource_metadata="${origin}/.well-known/oauth-protected-resource"`,
                   },
                 },
               );
@@ -1106,7 +1106,7 @@ export default {
         const headers: Record<string, string> = { "Content-Type": "application/json" };
         if (err.status === 401) {
           // RFC 6750: tell the client where to authenticate
-          headers["WWW-Authenticate"] = `Bearer realm="aiden-mcp", resource_metadata="${origin}/.well-known/oauth-protected-resource"`;
+          headers["WWW-Authenticate"] = `Bearer realm="fellow-mcp", resource_metadata="${origin}/.well-known/oauth-protected-resource"`;
         }
         return new Response(JSON.stringify({ error: err.message, status: err.status }), {
           status: err.status ?? 500,
