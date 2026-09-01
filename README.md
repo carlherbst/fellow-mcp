@@ -1,8 +1,21 @@
-# aiden-mcp
+# fellow-mcp
 
-An MCP server for the [Fellow Aiden](https://fellowproducts.com/products/aiden) coffee brewer. Lets Claude (and other MCP clients) brew good coffee with you — list, create, delete, and share profiles on your Aiden through natural language, scrape coffee details from any roaster's product page, and apply Aiden-specific brewing heuristics to design a recipe.
+An MCP server for Fellow's connected coffee machines — the [Aiden](https://fellowproducts.com/products/aiden) drip brewer and the [Espresso Series 1](https://fellowproducts.com/products/espresso-series-1). Lets Claude (and other MCP clients) brew good coffee with you — list, create, update, delete, and share profiles through natural language, scrape coffee details from any roaster's product page, and apply brewing heuristics to design a recipe.
 
-> **Unofficial.** Not affiliated with or endorsed by Fellow Industries. Uses the same private API the Fellow iOS app uses; could break without notice.
+> A fork of [ravenintheforrest/aiden-mcp](https://github.com/ravenintheforrest/aiden-mcp), which covers the Aiden. This fork adds Espresso Series 1 support.
+
+> **Unofficial.** Not affiliated with or endorsed by Fellow Industries. Uses the same private API the Fellow app uses; could break without notice.
+
+## Two machines, one API, two route shapes
+
+Both products live behind the same host and the same Bearer JWT, but the Series 1 sits under a product path segment the Aiden routes don't use:
+
+| Machine | Route | Profile kind |
+|---|---|---|
+| Aiden (drip) | `/v1/devices/{id}/profiles` | Brew profile — bloom, pulses, temperatures, ratio |
+| Espresso Series 1 | `/v2/solo/devices/{FS_id}/profiles` | **Pressure profile** — pre-infusion, ordered `{duration, pressure}` stages, ramp-down |
+
+The two schemas share no fields, which is why they have separate tool surfaces rather than a mode flag. A `FS_`-prefixed Series 1 id sent to the un-prefixed Aiden route 404s with "Device could not be found" — that is a wrong route, not an absent capability.
 
 ## What it does
 
@@ -16,6 +29,22 @@ An MCP server for the [Fellow Aiden](https://fellowproducts.com/products/aiden) 
 | `delete_profile` | OAuth | Free up a slot (Aiden has a 14-profile cap) |
 | `share_profile` | OAuth | Generate a `brew.link` for any existing profile |
 | `get_device_info` | OAuth | Verify connection + show slot usage |
+| `update_profile` | OAuth | Dial in an existing Aiden profile in place — the `brew.link` stays valid |
+| `list_schedules` / `create_schedule` / `delete_schedule` / `toggle_schedule` | OAuth | Recurring brews fired by the Aiden itself |
+
+### Espresso Series 1
+
+| Tool | Auth | What |
+|---|---|---|
+| `get_espresso_device_info` | OAuth | Verify the Series 1 is reachable; firmware, connection state, active profile |
+| `list_espresso_profiles` | OAuth | List profiles grouped by folder (custom / Fellow built-in / Drops), with raw JSON |
+| `create_espresso_profile` | OAuth | Push a pressure profile — dose, ratio, temp, pre-infusion, up to 10 `{duration, pressure}` stages, ramp-down |
+| `update_espresso_profile` | OAuth | Change any subset of fields; unspecified fields keep their values |
+| `delete_espresso_profile` | OAuth | Remove a user-created profile. Irreversible — Fellow has no undo |
+| `set_active_espresso_profile` | OAuth | Select the profile shown on the machine's front panel |
+| `share_espresso_profile` | OAuth | Generate a permanent, non-revocable `brew.link` |
+
+Espresso writes are built by allowlist, because Fellow validates with `forbidNonWhitelisted` — an unanticipated field is a 400, not an ignore. Every write is echo-checked against what was sent, so a 200 that silently saved different values is reported rather than treated as success. Live telemetry, shot history, and schedules are genuinely unavailable on the Series 1 — the endpoints do not exist.
 
 ## Example session
 
@@ -89,8 +118,8 @@ You can verify all of this by reading [`src/oauth/authorize.ts`](src/oauth/autho
 ## Self-hosting
 
 ```bash
-git clone https://github.com/ravenintheforrest/aiden-mcp
-cd aiden-mcp
+git clone https://github.com/carlherbst/fellow-mcp
+cd fellow-mcp
 npm install
 npx wrangler login
 
@@ -104,7 +133,9 @@ npx wrangler deploy
 
 Cloudflare's free tier covers 100k requests/day and 1k KV writes/day — plenty for personal or small-group use. The Worker is stateless beyond short-lived KV records, so no database to manage.
 
-To attach a custom domain after deploy: CF dashboard → Workers & Pages → `aiden-mcp` → Settings → Domains & Routes → Add Custom Domain.
+To attach a custom domain after deploy: CF dashboard → Workers & Pages → `fellow-mcp` → Settings → Domains & Routes → Add Custom Domain.
+
+> This fork is not deployed to Cloudflare. It runs `wrangler dev` in local mode (workerd) as a LAN-only container, so the Worker deploy path above is upstream's; it still works if you want it.
 
 ### API-drift canary (optional)
 

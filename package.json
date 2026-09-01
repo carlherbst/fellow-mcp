@@ -1,7 +1,7 @@
 {
-  "name": "aiden-mcp",
+  "name": "fellow-mcp",
   "version": "0.5.3",
-  "description": "MCP server for Fellow Aiden coffee brewer. Unofficial — not affiliated with Fellow Industries.",
+  "description": "MCP server for Fellow coffee machines — Aiden (drip) and Espresso Series 1. Unofficial — not affiliated with Fellow Industries.",
   "private": true,
   "type": "module",
   "scripts": {

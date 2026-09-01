@@ -10,8 +10,9 @@
  * calls, discard. Nothing is stored server-side.
  */
 
-const BASE_URL = "https://l8qtmnc692.execute-api.us-west-2.amazonaws.com/v1";
-const USER_AGENT = "Fellow/5 CFNetwork/1568.300.101 Darwin/24.2.0";
+export const API_HOST = "https://l8qtmnc692.execute-api.us-west-2.amazonaws.com";
+const BASE_URL = `${API_HOST}/v1`;
+export const USER_AGENT = "Fellow/5 CFNetwork/1568.300.101 Darwin/24.2.0";
 
 export interface FellowProfile {
   id?: string;
@@ -35,6 +36,38 @@ export interface FellowProfile {
 export interface FellowDevice {
   id: string;
   displayName?: string;
+  /**
+   * Product family. "Solo" is the Espresso Series 1; the Aiden reports
+   * something else. Fellow partitions its API by this value — see
+   * `apiPrefix()`.
+   */
+  deviceType?: string;
+  firmwareVersion?: string;
+  isConnected?: boolean;
+  activeProfileId?: string;
+  settingsVersion?: number;
+  enabledFlags?: string[];
+}
+
+/**
+ * Fellow's app builds every device URL as
+ *   getApiPrefix(deviceType) + "devices/" + id + path
+ * which yields a product path segment for the espresso machine and nothing
+ * for the Aiden:
+ *   Aiden             -> /v1/devices/{id}/profiles
+ *   Series 1 ("Solo") -> /v2/solo/devices/{id}/profiles
+ *
+ * A `FS_`-prefixed Series 1 id sent to the un-prefixed Aiden route 404s with
+ * "Device could not be found" — the handler resolves ids against an
+ * Aiden-only store. That 404 means wrong route, not absent capability.
+ */
+export function apiPrefix(deviceType?: string): string {
+  const t = (deviceType ?? "").toLowerCase();
+  return t ? `${t}/` : "";
+}
+
+export function isSolo(d: FellowDevice): boolean {
+  return (d.deviceType ?? "").toLowerCase() === "solo";
 }
 
 /**
@@ -201,19 +234,70 @@ export class FellowClient {
     }
   }
 
-  async getDevice(): Promise<FellowDevice> {
-    if (this.deviceId) return { id: this.deviceId, displayName: this.deviceName ?? undefined };
+  /**
+   * Every device on the account, across product families. The list route is
+   * the one place Fellow does not partition by product — an Aiden and an
+   * Espresso Series 1 come back together.
+   */
+  async listDevices(): Promise<FellowDevice[]> {
     const r = await fetch(`${BASE_URL}/devices?dataType=real`, {
       headers: this.headers(),
     });
-    const devices = (await r.json()) as FellowDevice[];
-    if (!devices?.length) {
-      throw new FellowApiError("No Aiden device found on this Fellow account", r.status);
+    if (!r.ok) {
+      throw new FellowApiError("Failed to list devices", r.status, await r.text());
     }
-    const d = devices[0];
-    this.deviceId = d.id;
-    this.deviceName = d.displayName ?? null;
-    return d;
+    const devices = (await r.json()) as FellowDevice[];
+    return Array.isArray(devices) ? devices : [];
+  }
+
+  /**
+   * The Aiden brewer on this account.
+   *
+   * Selects by *excluding* known non-Aiden product families rather than
+   * matching an Aiden `deviceType` string, because we have not observed what
+   * the Aiden reports — only that the Series 1 reports "Solo". Exclusion
+   * keeps a single-Aiden account working regardless.
+   *
+   * Previously this took `devices[0]` unconditionally, so an account with
+   * only an Espresso Series 1 paired would hand a `FS_` id to the Aiden
+   * routes and fail every tool with an opaque "Failed to list profiles".
+   */
+  async getDevice(): Promise<FellowDevice> {
+    if (this.deviceId) return { id: this.deviceId, displayName: this.deviceName ?? undefined };
+    const devices = await this.listDevices();
+    if (!devices.length) {
+      throw new FellowApiError("No devices found on this Fellow account");
+    }
+    const aiden = devices.find((d) => !isSolo(d));
+    if (!aiden) {
+      const others = devices
+        .map((d) => `${d.displayName ?? d.id} (${d.deviceType ?? "unknown type"})`)
+        .join(", ");
+      throw new FellowApiError(
+        `No Aiden brewer on this Fellow account. Found: ${others}. ` +
+          `Espresso Series 1 profiles are handled by the espresso_* tools instead.`,
+      );
+    }
+    this.deviceId = aiden.id;
+    this.deviceName = aiden.displayName ?? null;
+    return aiden;
+  }
+
+  /**
+   * The Espresso Series 1 on this account, if paired.
+   */
+  async getSoloDevice(): Promise<FellowDevice> {
+    const devices = await this.listDevices();
+    const solo = devices.find(isSolo);
+    if (!solo) {
+      const others = devices.length
+        ? devices.map((d) => `${d.displayName ?? d.id} (${d.deviceType ?? "unknown type"})`).join(", ")
+        : "none";
+      throw new FellowApiError(
+        `No Espresso Series 1 on this Fellow account. Found: ${others}.`,
+      );
+    }
+    return solo;
   }
 
   async listProfiles(): Promise<FellowProfile[]> {

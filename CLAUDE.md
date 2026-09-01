@@ -1,19 +1,40 @@
-# aiden-mcp — project map
+# fellow-mcp — project map
 
-Unofficial **MCP server for the Fellow Aiden coffee brewer**. Lets Claude push/list/delete/share brew profiles on the Aiden over Fellow's private API, scrape coffee details from roaster product pages, and apply Aiden-specific brewing heuristics to design a recipe. TypeScript, runs as a **Cloudflare Worker** (Streamable-HTTP MCP transport + OAuth 2.0). Pairs with the **Fellow_Aiden** MCP connector; vault notes live at `05) maker/aiden-mcp`.
+Unofficial **MCP server for Fellow's connected coffee machines** — the **Aiden** (drip) and the **Espresso Series 1**. Push/list/update/delete/share profiles over Fellow's private API, scrape coffee details from roaster product pages, and apply brewing heuristics to design a recipe. TypeScript, runs as a **Cloudflare Worker** (Streamable-HTTP MCP transport + OAuth 2.0).
 
-> Auto-loads when Claude opens `~/dev/aiden-mcp`. Read this first, then use the routing table. This repo has a GitHub remote (`ravenintheforrest/aiden-mcp`) — commit `TASKS.md`/`SESSIONS.md` so resume travels.
+> **This is `carlherbst/fellow-mcp`, a fork of `ravenintheforrest/aiden-mcp`** (still `upstream`). Upstream is Aiden-only; the fork adds Series 1 support on branch `feat/series-1-espresso`. Renamed from `aiden-mcp` 2026-08-07.
+>
+> `TASKS.md` and `SESSIONS.md` are **upstream's working notes** — another developer's machine, vault paths, and history. They are deliberately left unedited; don't treat them as describing this deployment.
+
+## Two machines, two route shapes
+
+Same host, same Bearer JWT, different product path segment and different profile schema:
+
+| Machine | Route | Client | Profile kind |
+|---|---|---|---|
+| Aiden | `/v1/devices/{id}/…` | `FellowClient` (`fellow-api.ts`) | brew — bloom, pulses, temps, ratio |
+| Espresso Series 1 | `/v2/solo/devices/{FS_id}/…` | `SoloClient` (`solo-api.ts`) | **pressure** — pre-infusion, `infusion[]` stages, ramp-down |
+
+`getDevice()` selects the Aiden by *excluding* `deviceType == "solo"`; `getSoloDevice()` selects the ES1. Schemas share no fields, hence separate tool surfaces rather than a mode flag.
+
+Espresso write rules that are easy to get wrong (all learned from live 400s — see `notes/fellow-api-series-1-findings.md` in the coffee repo):
+- Build write bodies by **allowlist** — Fellow validates with `forbidNonWhitelisted`, so an unanticipated field is a 400, and read responses carry fields (`device`, `synced`, Drops metadata) that must not be echoed back.
+- `folder` is required on writes even though it is read-only in practice.
+- Every write is echo-checked (`diffSoloEcho`) — a 200 that saved different values is reported, not treated as success.
 
 ## Where things live
-- **Machine:** 🐧 dev/build on **ravelab**. **Deploys to Cloudflare Workers** (`npx wrangler deploy`) — live at `https://aidenmcp.ravenhoward.org/mcp`. There is no long-running local server; the Worker is the runtime.
-- **State:** none persistent. Cloudflare KV (`AIDEN_OAUTH`) holds only short-lived records — auth codes ≤10min, access tokens ≤1hr, client regs ≤90d. **Only Fellow-issued JWTs are stored, never the Fellow password.**
-- **Secrets:** Cloudflare Worker secrets (`npx wrangler secret put …`) — canary account creds + webhook. Local dev vars in `.dev.vars` (untracked). Never in-repo.
+- **This fork is not deployed to Cloudflare.** It runs `wrangler dev` in **local mode (workerd)** as a LAN-only container: Komodo stack `aiden-mcp` on server `infra-lxc` (10.0.1.149), port 8787. The upstream Cloudflare deploy path still works but is unused here.
+- **Deploying a change:** push to the branch, then Komodo **deploy** (recreates on a compose change) or **restart** (re-fetches the branch). The start command hard-resets to `origin/$REPO_REF`, so local edits in the `app` volume are discarded.
+- **State:** none persistent. KV (`AIDEN_OAUTH`) holds only short-lived records — auth codes ≤10min, access tokens ≤1hr, client regs ≤90d. **Only Fellow-issued JWTs are stored, never the Fellow password.**
+- **Secrets:** canary account creds + webhook. Local dev vars in `.dev.vars` (untracked). Never in-repo.
 - **Auth model:** OAuth 2.0 auth-code + PKCE, or `X-Fellow-Email`/`X-Fellow-Password` headers. Password reaches server once at `/oauth/authorize`, exchanged for a Fellow JWT, then discarded.
-- **Profile data** (temperature/ratio priors) is harvested, not folk wisdom — see `data/`.
+- **Profile data** (temperature/ratio priors) is harvested, not folk wisdom — see `data/`. Aiden-oriented; the Series 1 has no equivalent dataset.
 
 ## Folder map
 - `src/index.ts` — Worker entry: HTTP routing, MCP server, tool registration, header auth.
-- `src/fellow-api.ts` — calls to Fellow's private API (list/create/update/delete/share, device info).
+- `src/fellow-api.ts` — **Aiden** client (list/create/update/delete/share, device info) + shared device discovery and `apiPrefix()`/`isSolo()`.
+- `src/solo-api.ts` — **Espresso Series 1** client for `/v2/solo/…`: allowlist write bodies, `settingsVersion` stamping, DELETE-with-body, forbidden-property retry, `diffSoloEcho`.
+- `src/solo-validation.ts` — zod contract for espresso pressure profiles + cross-field consistency checks.
 - `src/auth.ts` — Fellow `/auth/login` → JWT.
 - `src/fellow-schemas.ts` — zod contracts for Fellow API responses (drift detection).
 - `src/validation.ts` — client-side profile validation before write (clear errors, not 400s).
@@ -36,6 +57,8 @@ Unofficial **MCP server for the Fellow Aiden coffee brewer**. Lets Claude push/l
 |---|---|---|
 | A tool's behavior / MCP registration | `src/index.ts` + the tool's file | `oauth/`, `canary.ts` |
 | Fellow API call broke / new endpoint | `src/fellow-api.ts`, `src/auth.ts`, `src/fellow-schemas.ts` | `coffee-fetcher.ts`, brewing files |
+| Anything Espresso Series 1 | `src/solo-api.ts`, `src/solo-validation.ts` | `brewing-guidelines.ts`, `flash-brew.ts`, `data/` (all Aiden-only) |
+| Espresso write rejected (400) | `src/solo-api.ts` (allowlist + retry), `src/solo-validation.ts` | `validation.ts` (Aiden only) |
 | Profile rejected / validation errors | `src/validation.ts`, `README.md` (schema table) | `oauth/`, scraping |
 | Roaster page won't parse | `src/coffee-fetcher.ts` | Fellow API, oauth |
 | Brewing heuristics / recipe output | `src/brewing-guidelines.ts`, `src/grinders.ts`, `data/README.md` | `oauth/`, `fellow-api.ts` |

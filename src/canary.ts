@@ -273,8 +273,8 @@ async function report(env: Env, findings: string[]): Promise<void> {
 
   const message =
     fingerprint === "ok"
-      ? "✅ aiden-mcp canary: recovered — Fellow API back to expected shape"
-      : `🚨 aiden-mcp canary: Fellow API drift detected (${findings.length} finding(s))\n${findings
+      ? "✅ fellow-mcp canary: recovered — Fellow API back to expected shape"
+      : `🚨 fellow-mcp canary: Fellow API drift detected (${findings.length} finding(s))\n${findings
           .map((f) => `• ${f}`)
           .join("\n")}`;
 

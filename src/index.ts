@@ -1,8 +1,13 @@
 /**
- * aiden-mcp — Cloudflare Worker hosting an MCP server for the Fellow Aiden coffee brewer.
+ * fellow-mcp — Cloudflare Worker hosting an MCP server for Fellow coffee machines.
+ *
+ * Covers two products, which share a host and an auth token but not a route
+ * shape or a profile schema:
+ *   - Fellow Aiden (drip)        /v1/devices/{id}/…        brew profiles
+ *   - Fellow Espresso Series 1   /v2/solo/devices/{id}/…   pressure profiles
  *
  * Unofficial — not affiliated with or endorsed by Fellow Industries.
- * Uses the same private API the Fellow iOS app uses; could break without notice.
+ * Uses the same private API the Fellow app uses; could break without notice.
  *
  * Architecture:
  *   - Streamable HTTP MCP transport at /mcp
@@ -19,6 +24,12 @@ import { z } from "zod";
 import { clientFromHeaders, NoCredentialsError, ExpiredTokenError } from "./auth.js";
 import { profileInputSchema, checkPulseConsistency } from "./validation.js";
 import { FellowApiError, categorize, CUSTOM_PROFILE_CAP } from "./fellow-api.js";
+import { SoloClient, categorizeSolo, SoloProfile, diffSoloEcho } from "./solo-api.js";
+import {
+  soloCreateSchema,
+  soloUpdateFields,
+  checkSoloConsistency,
+} from "./solo-validation.js";
 import { diffProfileEcho } from "./fellow-schemas.js";
 import { fetchCoffeeDetails } from "./coffee-fetcher.js";
 import { brewingGuidelines } from "./brewing-guidelines.js";
@@ -36,9 +47,36 @@ import { Env } from "./oauth/kv.js";
 
 const VERSION = "0.5.3";
 
+/**
+ * A SoloClient (Espresso Series 1) built from the same per-request auth as the
+ * Aiden tools. Reuses FellowClient purely for its JWT and device discovery —
+ * the Series 1 routes themselves live under a different product prefix.
+ */
+async function soloFromHeaders(headers: Headers, env: Env): Promise<SoloClient> {
+  const fellow = await clientFromHeaders(headers, env);
+  const jwt = fellow.getToken();
+  if (!jwt) {
+    throw new FellowApiError("Authenticated but no Fellow token available");
+  }
+  return new SoloClient(jwt, () => fellow.getSoloDevice());
+}
+
+/** Render an espresso profile as a one-liner, defensive about missing fields. */
+function fmtSolo(p: SoloProfile): string {
+  const bits = [
+    p.dose != null ? `${p.dose}g` : "",
+    p.ratio != null ? `1:${p.ratio}` : "",
+    p.temperature != null ? `${p.temperature}°C` : "",
+    p.grindSize != null ? `grind ${p.grindSize}` : "",
+    Array.isArray(p.infusion) && p.infusion.length ? `${p.infusion.length} stages` : "",
+  ].filter(Boolean);
+  const head = `  ${p.id ?? "(no id)"}  ${p.title ?? "(untitled)"}`;
+  return bits.length ? `${head}  —  ${bits.join(", ")}` : head;
+}
+
 function makeServer(headers: Headers, env: Env): McpServer {
   const server = new McpServer({
-    name: "aiden-mcp",
+    name: "fellow-mcp",
     version: VERSION,
   });
 
@@ -599,6 +637,330 @@ function makeServer(headers: Headers, env: Env): McpServer {
     },
   );
 
+  // ============================================================
+  // Espresso Series 1 ("Solo") — separate product, separate API prefix.
+  // Espresso profiles are pressure profiles and share no fields with Aiden
+  // brew profiles, so these are distinct tools rather than a mode flag.
+  // ============================================================
+
+  // ---- get_espresso_device_info ----
+  server.tool(
+    "get_espresso_device_info",
+    "Get info about your connected Fellow Espresso Series 1 (name, firmware, connection state, active profile). Lightweight call — use it to verify the Series 1 is reachable before heavier operations. This is the espresso machine, NOT the Aiden drip brewer; use get_device_info for the Aiden.",
+    {},
+    async () => {
+      const client = await soloFromHeaders(headers, env);
+      const d = await client.getDevice();
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              `Device: ${d.displayName ?? "Espresso Series 1"}\n` +
+              `ID: ${d.id}\n` +
+              `Type: ${d.deviceType ?? "?"}\n` +
+              `Firmware: ${d.firmwareVersion ?? "?"}\n` +
+              `Connected: ${d.isConnected ?? "?"}\n` +
+              `Active profile: ${d.activeProfileId ?? "?"}\n\n` +
+              `Raw device object:\n${JSON.stringify(d, null, 2)}`,
+          },
+        ],
+      };
+    },
+  );
+
+  // ---- list_espresso_profiles ----
+  server.tool(
+    "list_espresso_profiles",
+    "List all espresso profiles on your Fellow Espresso Series 1, grouped by folder (custom = user-created, fellow = built-in, drops = Fellow Drops). Returns raw JSON alongside the summary, because Fellow's espresso profile schema is undocumented and unstable — the raw form is what you reason over when a field is missing from the summary.",
+    {},
+    async () => {
+      const client = await soloFromHeaders(headers, env);
+      const device = await client.getDevice();
+      const profiles = await client.listProfiles();
+      if (!profiles.length) {
+        return { content: [{ type: "text", text: "No espresso profiles on this Series 1." }] };
+      }
+
+      const grouped: Record<string, SoloProfile[]> = { custom: [], fellow: [], drops: [], unknown: [] };
+      for (const p of profiles) grouped[categorizeSolo(p)].push(p);
+
+      const lines: string[] = [
+        `Espresso Series 1: ${device.displayName ?? "Series 1"}`,
+        `Active profile: ${device.activeProfileId ?? "?"}`,
+        `${profiles.length} profiles total`,
+      ];
+      for (const [label, key] of [
+        ["Custom (user-created)", "custom"],
+        ["Fellow built-in", "fellow"],
+        ["Fellow Drops", "drops"],
+        ["Uncategorized", "unknown"],
+      ] as const) {
+        if (grouped[key].length) {
+          lines.push("", `${label} (${grouped[key].length}):`, ...grouped[key].map(fmtSolo));
+        }
+      }
+      lines.push("", "Raw JSON:", JSON.stringify(profiles, null, 2));
+
+      return { content: [{ type: "text", text: lines.join("\n") }] };
+    },
+  );
+
+  // ---- set_active_espresso_profile ----
+  server.tool(
+    "set_active_espresso_profile",
+    "Set which espresso profile is active on the Series 1. The change propagates to the machine's front panel. Pass the profile id or exact case-sensitive title — run list_espresso_profiles first if unsure.",
+    {
+      idOrTitle: z
+        .string()
+        .min(1)
+        .describe("Espresso profile id, or exact case-sensitive title"),
+    },
+    async ({ idOrTitle }) => {
+      const client = await soloFromHeaders(headers, env);
+      const profile = await client.findProfile(idOrTitle);
+      if (!profile) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: `No espresso profile matched "${idOrTitle}". Run list_espresso_profiles — titles are case-sensitive.`,
+            },
+          ],
+        };
+      }
+      await client.setActiveProfile(profile.id!);
+      return {
+        content: [
+          {
+            type: "text",
+            text: `Active espresso profile set to "${profile.title ?? profile.id}" (id: ${profile.id}). Check the machine's front panel to confirm.`,
+          },
+        ],
+      };
+    },
+  );
+
+  // ---- create_espresso_profile ----
+  server.tool(
+    "create_espresso_profile",
+    "Create a new espresso profile on the Fellow Espresso Series 1. This is a PRESSURE profile — the shape of the shot is the `infusion` array of {duration, pressure} stages, optionally preceded by pre-infusion and followed by a ramp-down. Nothing like an Aiden brew profile; use create_profile for the Aiden. Unspecified fields default to Fellow's 'Classic 9 bar' built-in.",
+    soloCreateSchema.shape,
+    async (input) => {
+      const parsed = soloCreateSchema.parse(input);
+      const problems = checkSoloConsistency(parsed);
+      if (problems.length) {
+        return {
+          isError: true,
+          content: [
+            { type: "text", text: `Profile validation failed:\n  ${problems.join("\n  ")}` },
+          ],
+        };
+      }
+
+      const client = await soloFromHeaders(headers, env);
+      const created = await client.createProfile(parsed as SoloProfile);
+
+      const drift = diffSoloEcho(
+        parsed as Record<string, unknown>,
+        created as unknown as Record<string, unknown>,
+      );
+      const stages = parsed.infusion
+        .map((s) => `${s.pressure}bar×${s.duration}s`)
+        .join(" → ");
+
+      let text =
+        `Created espresso profile "${created.title ?? parsed.title}" (id: ${created.id}).\n` +
+        `${parsed.dose}g in, 1:${parsed.ratio} (${(parsed.dose * parsed.ratio).toFixed(1)}g out), ${parsed.temperature}°C, grind ${parsed.grindSize}\n` +
+        `Shot: ${parsed.preInfusionEnabled ? `pre-infuse ${parsed.preInfusionDuration}s @ ${parsed.preInfusionHoldPressure}bar → ` : ""}${stages}${parsed.rampDownEnabled ? ` → ramp down to ${parsed.rampDownEndPressure}bar over ${parsed.rampDownDuration}s` : ""}\n\n` +
+        `It's on the machine now. Use set_active_espresso_profile to select it on the front panel.`;
+      if (drift.length) {
+        text +=
+          `\n\n⚠ IMPORTANT — Fellow saved different values than were sent (possible API change). ` +
+          `Tell the user to verify the profile in the Fellow app before pulling a shot:\n` +
+          drift.map((d) => `  - ${d}`).join("\n");
+      }
+      return { content: [{ type: "text", text }] };
+    },
+  );
+
+  // ---- update_espresso_profile ----
+  server.tool(
+    "update_espresso_profile",
+    "Update an espresso profile on the Series 1 in place — the normal way to dial a shot in. Pass the profile id or exact title plus ANY subset of fields; unspecified fields keep their current values. Only user-created profiles can be edited; Fellow built-ins and Drops profiles are read-only.",
+    {
+      idOrTitle: z
+        .string()
+        .min(1)
+        .describe("Espresso profile id, or exact case-sensitive title"),
+      ...soloUpdateFields,
+    },
+    async (input) => {
+      const { idOrTitle, ...rest } = input as { idOrTitle: string } & Record<string, unknown>;
+      // Drop keys the caller did not supply. Belt-and-braces against a schema
+      // that lets an absent field through as a concrete value: merging
+      // `{...existing, someField: undefined}` would blank a field nobody asked
+      // to change, and the server nulls its dependents in turn.
+      const changes: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(rest)) {
+        if (v !== undefined) changes[k] = v;
+      }
+      const client = await soloFromHeaders(headers, env);
+      const existing = await client.findProfile(idOrTitle);
+      if (!existing) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: `No espresso profile matched "${idOrTitle}". Run list_espresso_profiles — titles are case-sensitive.`,
+            },
+          ],
+        };
+      }
+      const folder = (existing.folder ?? "").toLowerCase();
+      if (folder && folder !== "custom") {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text:
+                `"${existing.title}" is a ${folder === "drops" ? "Fellow Drops" : "Fellow built-in"} profile and cannot be edited.\n` +
+                `Create a copy with create_espresso_profile and change that instead.`,
+            },
+          ],
+        };
+      }
+
+      // PATCH validates the whole DTO, so merge onto the existing profile
+      // rather than sending only the changed fields.
+      const merged = { ...existing, ...changes } as SoloProfile;
+      const problems = checkSoloConsistency(merged as never);
+      if (problems.length) {
+        return {
+          isError: true,
+          content: [
+            { type: "text", text: `Update would create an inconsistent profile:\n  ${problems.join("\n  ")}` },
+          ],
+        };
+      }
+
+      const updated = await client.updateProfile(existing.id!, merged);
+      const drift = diffSoloEcho(
+        changes as Record<string, unknown>,
+        updated as unknown as Record<string, unknown>,
+      );
+      const changed = Object.keys(changes);
+      let text =
+        `Updated "${updated.title ?? existing.title}" (id: ${existing.id}).\n` +
+        `Changed: ${changed.length ? changed.join(", ") : "(nothing)"}`;
+      if (drift.length) {
+        text +=
+          `\n\n⚠ IMPORTANT — Fellow saved different values than were sent (possible API change). ` +
+          `Tell the user to verify the profile in the Fellow app before pulling a shot:\n` +
+          drift.map((d) => `  - ${d}`).join("\n");
+      }
+      return { content: [{ type: "text", text }] };
+    },
+  );
+
+  // ---- delete_espresso_profile ----
+  server.tool(
+    "delete_espresso_profile",
+    "Delete a user-created espresso profile from the Series 1. IRREVERSIBLE — Fellow has no recycle bin and no undo. Confirm with the user before calling, and consider list_espresso_profiles first so the profile's values can be recorded and recreated if this turns out to be a mistake. Fellow built-ins and Drops profiles cannot be deleted.",
+    {
+      idOrTitle: z
+        .string()
+        .min(1)
+        .describe("Espresso profile id, or exact case-sensitive title"),
+    },
+    async ({ idOrTitle }) => {
+      const client = await soloFromHeaders(headers, env);
+      const profile = await client.findProfile(idOrTitle);
+      if (!profile) {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: `No espresso profile matched "${idOrTitle}". Run list_espresso_profiles — titles are case-sensitive.`,
+            },
+          ],
+        };
+      }
+      const folder = (profile.folder ?? "").toLowerCase();
+      if (folder && folder !== "custom") {
+        return {
+          isError: true,
+          content: [
+            {
+              type: "text",
+              text: `"${profile.title}" is a ${folder === "drops" ? "Fellow Drops" : "Fellow built-in"} profile and cannot be deleted.`,
+            },
+          ],
+        };
+      }
+      await client.deleteProfile(profile.id!);
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              `Deleted espresso profile "${profile.title}" (id: ${profile.id}).\n\n` +
+              `Its settings were: ${JSON.stringify(
+                {
+                  dose: profile.dose,
+                  ratio: profile.ratio,
+                  temperature: profile.temperature,
+                  grindSize: profile.grindSize,
+                  infusion: profile.infusion,
+                },
+                null,
+                2,
+              )}\n(Recorded here because Fellow has no undo.)`,
+          },
+        ],
+      };
+    },
+  );
+
+  // ---- share_espresso_profile ----
+  server.tool(
+    "share_espresso_profile",
+    "Generate a brew.link URL for an espresso profile on the Series 1. IMPORTANT: share links are permanent, immutable and cannot be revoked or deleted — every unshare route returns 403. The link carries a pseudonymous account id. Tell the user this before generating one they might not want public.",
+    {
+      idOrTitle: z
+        .string()
+        .min(1)
+        .describe("Espresso profile id, or exact case-sensitive title"),
+    },
+    async ({ idOrTitle }) => {
+      const client = await soloFromHeaders(headers, env);
+      const profile = await client.findProfile(idOrTitle);
+      if (!profile) {
+        return {
+          isError: true,
+          content: [
+            { type: "text", text: `No espresso profile matched "${idOrTitle}". Run list_espresso_profiles first.` },
+          ],
+        };
+      }
+      const link = await client.shareProfile(profile.id!);
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              `brew.link for "${profile.title ?? profile.id}": ${link}\n\n` +
+              `This link is permanent and cannot be revoked.`,
+          },
+        ],
+      };
+    },
+  );
+
   return server;
 }
 
@@ -645,10 +1007,10 @@ export default {
       // ---- Health / root ----
       if (request.method === "GET" && (pathname === "/" || pathname === "/health")) {
         return Response.json({
-          name: "aiden-mcp",
+          name: "fellow-mcp",
           version: VERSION,
           description:
-            "MCP server for Fellow Aiden brewer. Unofficial — not affiliated with Fellow Industries.",
+            "MCP server for Fellow coffee machines — Aiden (drip) and Espresso Series 1. Unofficial — not affiliated with Fellow Industries.",
           transport: "streamable-http",
           mcp_endpoint: "/mcp",
           oauth: {
@@ -657,7 +1019,7 @@ export default {
             token: `${origin}/oauth/token`,
             register: `${origin}/oauth/register`,
           },
-          docs: "https://github.com/ravenintheforrest/aiden-mcp",
+          docs: "https://github.com/carlherbst/fellow-mcp",
         });
       }
 
@@ -676,6 +1038,13 @@ export default {
           "create_schedule",
           "delete_schedule",
           "toggle_schedule",
+          "get_espresso_device_info",
+          "list_espresso_profiles",
+          "create_espresso_profile",
+          "update_espresso_profile",
+          "delete_espresso_profile",
+          "set_active_espresso_profile",
+          "share_espresso_profile",
         ]);
 
         // Inspect the JSON-RPC method without consuming the body
