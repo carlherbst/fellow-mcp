@@ -352,6 +352,16 @@ export class SoloClient {
   }
 
   /**
+   * Ask the machine to end the shot in progress. The route 200-accepts, but
+   * whether firmware acts on it is unknown — under 2.3.20 `start` and `rinse`
+   * were verified no-ops and `stop` was never fired. The caller must confirm
+   * against the front panel. Returns the raw response body for the record.
+   */
+  async stopShot(): Promise<unknown> {
+    return this.call("PATCH", "/stop?confirm=true");
+  }
+
+  /**
    * Mint a brew.link. The link is a permanent, immutable, non-revocable
    * snapshot carrying a pseudonymous `sharedFrom` id — there is no unshare.
    */

@@ -742,6 +742,31 @@ function makeServer(headers: Headers, env: Env): McpServer {
     },
   );
 
+  // ---- stop_espresso_shot ----
+  server.tool(
+    "stop_espresso_shot",
+    "Ask the Fellow Espresso Series 1 to stop the shot currently running. EXPERIMENTAL: Fellow's cloud accepts this call (HTTP 200) but on firmware 2.3.20 the sibling start/rinse commands were ignored by the machine, and stop has never been tested. Only call while a shot is actually in progress and someone is watching the machine — the front panel is the only proof it worked. Harmless when idle. Returns the raw API response and the time the call was made so the result can be matched against the shot clock.",
+    {},
+    async () => {
+      const client = await soloFromHeaders(headers, env);
+      const sentAt = new Date();
+      const body = await client.stopShot();
+      const returnedAt = new Date();
+      return {
+        content: [
+          {
+            type: "text",
+            text: [
+              `Stop command accepted by Fellow's cloud at ${sentAt.toISOString()} (round trip ${returnedAt.getTime() - sentAt.getTime()} ms).`,
+              `That only proves the API took it — check the machine: did the pump stop? Note the shot time on the panel.`,
+              `Raw response: ${JSON.stringify(body)}`,
+            ].join("\n"),
+          },
+        ],
+      };
+    },
+  );
+
   // ---- create_espresso_profile ----
   server.tool(
     "create_espresso_profile",
@@ -1059,6 +1084,7 @@ export default {
           "update_espresso_profile",
           "delete_espresso_profile",
           "set_active_espresso_profile",
+          "stop_espresso_shot",
           "share_espresso_profile",
         ]);
 

@@ -42,6 +42,7 @@ The two schemas share no fields, which is why they have separate tool surfaces r
 | `update_espresso_profile` | OAuth | Change any subset of fields; unspecified fields keep their values |
 | `delete_espresso_profile` | OAuth | Remove a user-created profile. Irreversible — Fellow has no undo |
 | `set_active_espresso_profile` | OAuth | Select the profile shown on the machine's front panel |
+| `stop_espresso_shot` | OAuth | **Experimental.** `PATCH …/stop` — the cloud accepts it; whether firmware acts on it is untested. Only fire during a watched shot |
 | `share_espresso_profile` | OAuth | Generate a permanent, non-revocable `brew.link` |
 
 Espresso writes are built by allowlist, because Fellow validates with `forbidNonWhitelisted` — an unanticipated field is a 400, not an ignore. Every write is echo-checked against what was sent, so a 200 that silently saved different values is reported rather than treated as success. Live telemetry, shot history, and schedules are genuinely unavailable on the Series 1 — the endpoints do not exist.
