@@ -1065,6 +1065,18 @@ export default {
 
       // ---- MCP resource endpoint ----
       if (pathname === "/mcp" || pathname === "/sse") {
+        // This transport is stateless (no session id, JSON responses), so it
+        // never sends server-initiated messages. The SDK still answers a GET by
+        // opening a standalone SSE stream that nothing ever writes to; under
+        // wrangler/workerd that is detected as a hung request and logged as
+        // "Uncaught Error: The Workers runtime canceled this request" on every
+        // GET. That loop wrote a 3.3 GB container log and filled the host disk
+        // (2026-10-04). The Streamable HTTP spec allows 405 for GET when the
+        // server offers no SSE stream; clients treat it as "no push channel".
+        if (request.method === "GET") {
+          return new Response(null, { status: 405, headers: { Allow: "POST" } });
+        }
+
         // Tools split by whether they need Fellow credentials.
         // Pure-compute / pure-fetch tools work for anyone — no Fellow account needed.
         const FELLOW_AUTH_TOOLS = new Set([
